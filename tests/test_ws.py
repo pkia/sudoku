@@ -96,21 +96,36 @@ def test_coop_full_lifecycle(client):
         ss, se = sync_both(ws, we)
         assert 4 in se["notes"][str(idx2)]
 
-        # One sets a value adjacent -> peer note auto-cleaned
-        for p in [p for p in peers(idx2) if se["puzzle"][p] == "0" and str(p) not in se["cells"]][:1]:
+        # One sets a value adjacent -> peer note auto-cleaned (then erase it again:
+        # a leftover wrong value would legitimately block completion)
+        peer_targets = [p for p in peers(idx2) if se["puzzle"][p] == "0" and str(p) not in se["cells"]]
+        if peer_targets:
+            p = peer_targets[0]
             we.send_json({"type": "set", "idx": p, "value": 4})
             se, ss = sync_both(we, ws)
             assert 4 not in se["notes"].get(str(idx2), [])
+            we.send_json({"type": "erase", "idx": p})
+            se, ss = sync_both(we, ws)
+            assert str(p) not in se["cells"]
 
     # Two disconnects; One continues (still receives state after his own moves)
     with ws_connect(client, gid, "one", one) as we:
-        pres = recv_until(we, "presence")
-        assert "two" not in pres["online"]
+        recv_until(we, "state")  # consume initial state before sending ops
+        # One is connected -> Two's home shows him online even though she left
+        assert client.get("/api/home?token=" + two).json()["partner_online"] is True
         idx3 = next(i for i, ch in enumerate(se["puzzle"]) if ch == "0" and str(i) not in se["cells"])
         v3 = int(se_solution(client, gid, one, idx3))
         we.send_json({"type": "set", "idx": idx3, "value": v3})
         se = recv_until(we, "state")["game"]
         assert se["cells"][str(idx3)]["v"] == v3
+
+    # nobody connected now -> partner shows offline
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if client.get("/api/home?token=" + two).json()["partner_online"] is False:
+            break
+        time.sleep(0.05)
+    assert client.get("/api/home?token=" + two).json()["partner_online"] is False
 
     # Two returns -> syncs to authoritative state
     with ws_connect(client, gid, "two", two) as ws:
@@ -120,18 +135,16 @@ def test_coop_full_lifecycle(client):
 
     # Finish the puzzle together -> both see completion
     with ws_connect(client, gid, "one", one) as we, ws_connect(client, gid, "two", two) as ws:
-        recv_until(we, "state")
-        recv_until(ws, "state")
-        cur = client.get(f"/api/games/{gid}?token=" + one).json()["game"]
+        se, ss = sync_both(we, ws)
+        cur = se
         sol = sol_of(client, gid, one)
         for i, ch in enumerate(cur["puzzle"]):
             if ch == "0" and str(i) not in cur["cells"]:
                 we.send_json({"type": "set", "idx": i, "value": int(sol[i])})
-                se = recv_until(we, "state")["game"]
+                se, ss = sync_both(we, ws)
                 if se["state"] == "completed":
                     break
         assert se["state"] == "completed"
-        ss = recv_until(ws, "state")["game"]
         assert ss["state"] == "completed"
         assert ss["running"] is False
 
@@ -175,9 +188,13 @@ def test_timer_pauses_when_last_socket_leaves(client):
         s = recv_until(we, "state")["game"]
         assert s["running"] is True
         time.sleep(0.3)
-    time.sleep(0.2)  # let the server's disconnect cleanup run
-
-    g = client.get(f"/api/games/{gid}?token=" + one).json()["game"]
+    # wait for the server's last-socket disconnect cleanup (timer pause)
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        g = client.get(f"/api/games/{gid}?token=" + one).json()["game"]
+        if g["running"] is False:
+            break
+        time.sleep(0.05)
     assert g["running"] is False
     assert g["elapsed_ms"] >= 250  # ~0.3s accumulated while connected
 

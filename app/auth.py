@@ -1,11 +1,11 @@
-"""Private two-player auth: one shared passcode, identity = one|two."""
+"""Two-player auth: one shared passcode, identity = the configured roster."""
 from __future__ import annotations
 
 import hashlib
 import hmac
 import time
 
-PLAYERS = ("one", "two")
+DEFAULT_PLAYERS = ("one", "two")
 
 
 def _sign(secret: str, payload: str) -> str:
@@ -16,11 +16,11 @@ def make_token(secret: str, player: str) -> str:
     return f"{player}.{_sign(secret, player)}"
 
 
-def verify_token(secret: str, token: str):
+def verify_token(secret: str, token: str, players=DEFAULT_PLAYERS):
     if not token or "." not in token:
         return None
     player, _, sig = token.rpartition(".")
-    if player not in PLAYERS:
+    if player not in players:
         return None
     if hmac.compare_digest(sig, _sign(secret, player)):
         return player
@@ -49,3 +49,6 @@ class RateLimiter:
         if len(self.hits) > 10000:
             self.hits.clear()
         return n <= self.max
+
+    def reset(self, key: str):
+        self.hits.pop(key, None)
