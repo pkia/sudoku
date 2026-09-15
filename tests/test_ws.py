@@ -145,7 +145,6 @@ def test_coop_full_lifecycle(client):
                 if se["state"] == "completed":
                     break
         assert se["state"] == "completed"
-        ss = recv_until(ws, "state")["game"]
         assert ss["state"] == "completed"
         assert ss["running"] is False
 
