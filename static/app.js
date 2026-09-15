@@ -1,4 +1,4 @@
-/* Our Sudoku — app logic (no build step, no external requests) */
+/* Our Sudoku — NYT-identical gameplay (light theme, meaning-based colors) */
 "use strict";
 
 const $ = (sel, el) => (el || document).querySelector(sel);
@@ -7,6 +7,34 @@ const LS = {
   get(k, d) { try { const v = localStorage.getItem("sud." + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem("sud." + k, JSON.stringify(v)); } catch {} },
 };
+
+/* ---------- NYT gameboard settings (per device) ---------- */
+const SETTINGS_DEFAULTS = {
+  check: true,
+  autoCandidate: false,
+  errorCounter: true,
+  showTimer: true,
+  hlConflicts: true,
+  hlRowCol: true,
+  hlBox: true,
+  hlSame: true,
+  sound: true,
+};
+let settings = Object.assign({}, SETTINGS_DEFAULTS, LS.get("settings", {}));
+function saveSettings() { LS.set("settings", settings); }
+
+const SETTING_META = [
+  { key: "check", label: "Check guesses when entered" },
+  { key: "autoCandidate", label: "Start in auto candidate mode" },
+  { key: "errorCounter", label: "Show error counter" },
+  { key: "showTimer", label: "Show timer" },
+  { key: "hlConflicts", label: "Highlight conflicts" },
+  { key: "hlRowCol", label: "Highlight row and column" },
+  { key: "hlBox", label: "Highlight box" },
+  { key: "hlSame", label: "Highlight identical numbers" },
+  { key: "sound", label: "Play sound on solve" },
+];
+
 const app = $("#app");
 let toastTimer = null;
 function toast(msg) {
@@ -14,7 +42,7 @@ function toast(msg) {
   t.textContent = msg;
   t.classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove("show"), 2400);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 2200);
 }
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -40,6 +68,29 @@ function fmtAgo(ts) {
 }
 function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
+/* ---------- sound ---------- */
+let audioCtx = null;
+function playJingle() {
+  if (!settings.sound) return;
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    const now = audioCtx.currentTime;
+    [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = "sine";
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0, now + i * 0.12);
+      g.gain.linearRampToValueAtTime(0.2, now + i * 0.12 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.12 + 0.5);
+      o.connect(g).connect(audioCtx.destination);
+      o.start(now + i * 0.12);
+      o.stop(now + i * 0.12 + 0.55);
+    });
+  } catch {}
+}
+
 /* ---------- net ---------- */
 async function api(path, opts) {
   const token = LS.get("token");
@@ -55,12 +106,9 @@ async function api(path, opts) {
 
 /* ---------- identity ---------- */
 function me() { return LS.get("player", null); }
-function partner() { return me() === "one" ? "two" : "one"; }
+let ROSTER = ["one", "two"];
+function partner() { return ROSTER.find((p) => p !== me()) || ROSTER[0]; }
 function signedIn() { return !!(me() && LS.get("token")); }
-function signOut() {
-  LS.set("token", null); LS.set("player", null);
-  goWelcome();
-}
 
 /* ---------- routing ---------- */
 let view = null;
@@ -75,22 +123,21 @@ function unloadView() {
   if (view) { view.unbind.forEach((f) => { try { f(); } catch {} }); view = null; }
 }
 
-/* ---------- welcome / sign-in ---------- */
+/* ---------- welcome ---------- */
 function goWelcome() {
   unloadView();
   const el = setView(`
     <div class="welcome">
       <div class="logo" aria-hidden="true"><span>5</span><span>3</span><span>·</span><span>6</span><span>·</span><span>·</span><span>·</span><span>9</span><span>8</span></div>
       <h1 class="wordmark">Our Sudoku</h1>
-      <p class="tag">A little puzzle place for two</p>
+      <p class="tag">our little puzzle place 💕</p>
       <div class="passcard">
         <label for="pc0">Our secret code</label>
         <div class="passcode" id="pcode">
           ${[0, 1, 2, 3].map((i) => `<input id="pc${i}" inputmode="numeric" autocomplete="off" maxlength="1" aria-label="digit ${i + 1}">`).join("")}
         </div>
         <div class="who">
-          <button id="who-one"><span class="em">👦</span>One</button>
-          <button id="who-two"><span class="em">👧</span>Two</button>
+          ${ROSTER.map((p, i) => `<button data-p="${p}"><span class="em">${cap(p).slice(0, 1)}</span>${cap(p)}</button>`).join("")}
         </div>
         <div class="err" id="werr"></div>
         <button class="btn-primary" id="enter" disabled>Enter</button>
@@ -98,15 +145,14 @@ function goWelcome() {
       </div>
     </div>`);
   const digits = $$("#pcode input");
-  const who = { one: false, two: false };
   const err = $("#werr");
   const enterBtn = $("#enter");
   let picked = null;
   $$(".who button", el).forEach((b) => {
     b.addEventListener("click", () => {
-      picked = b.id.replace("who-", "");
+      picked = b.dataset.p;
       $$(".who button").forEach((x) => (x.className = ""));
-      b.classList.add("sel-" + picked);
+      b.classList.add("sel-" + ROSTER.indexOf(picked));
       refresh();
     });
   });
@@ -121,9 +167,7 @@ function goWelcome() {
       if (e.key === "Enter") tryEnter();
     });
   });
-  function ready() {
-    return picked && digits.every((d) => d.value !== "");
-  }
+  function ready() { return picked && digits.every((d) => d.value !== ""); }
   function refresh() { enterBtn.disabled = !ready(); err.textContent = ""; }
   async function tryEnter() {
     if (!ready()) return;
@@ -148,17 +192,21 @@ function goWelcome() {
     }
   }
   enterBtn.addEventListener("click", tryEnter);
+  digits[0].focus();
 }
 
 /* ---------- home ---------- */
-let homePoll = null;
+let lastHome = null;
 function goHome() {
   unloadView();
   const el = setView(`
     <div>
       <div class="homehead">
         <h1 class="wordmark">Our Sudoku</h1>
-        <div class="me-chip"><span class="dot" id="pdot"></span><span id="pstat">${cap(partner())} offline</span></div>
+        <div style="display:flex;align-items:center;gap:12px">
+          <div class="me-chip"><span class="dot" id="pdot"></span><span id="pstat"></span></div>
+          <button class="gear" id="home-gear" aria-label="settings">⚙️</button>
+        </div>
       </div>
       <div class="homesub" id="greet"></div>
 
@@ -168,19 +216,24 @@ function goHome() {
       </div>
 
       <div class="sect" id="s-join" hidden>
-        <div class="sect-title">${esc(cap(partner()))} made these — join in</div>
+        <div class="sect-title" id="join-title"></div>
         <div id="join-cards"></div>
       </div>
 
       <div class="sect" id="s-open" hidden>
-        <div class="sect" style="margin-bottom:0"><div class="sect-title">Waiting for ${esc(cap(partner()))}</div><div id="open-cards"></div></div>
+        <div class="sect-title" id="open-title"></div>
+        <div id="open-cards"></div>
+      </div>
+
+      <div class="sect" id="s-solo" hidden>
+        <div class="sect-title">Solo</div>
+        <div id="solo-cards"></div>
       </div>
 
       <div class="sect">
         <button class="newbtn big" id="new-coop">✚&ensp;New game together</button>
         <div class="solorow">
           <button class="newbtn" id="new-solo">Solo · new</button>
-          <button class="newbtn" id="resume-solo" hidden>Continue solo</button>
         </div>
       </div>
 
@@ -189,74 +242,71 @@ function goHome() {
         <div class="hist" id="recent-cards"></div>
       </div>
     </div>`);
-
   const render = (data) => {
+    lastHome = data;
     const greet = $("#greet", el);
     const hour = new Date().getHours();
-    const hi = hour < 5 ? "Up late" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
-    greet.textContent = `${hi}, ${me() === "one" ? "One" : "Two"}.`;
+    const hi = hour < 5 ? "Up late, hm?" : hour < 12 ? "Good morning, sunshine ☀️" : hour < 18 ? "Happy afternoon" : "Cozy evening, eh?";
+    greet.textContent = `${hi}, ${cap(me())}.`;
 
     const dot = $("#pdot", el), pstat = $("#pstat", el);
     if (data.partner_online) { dot.classList.add("on"); pstat.textContent = `${cap(partner())} online`; }
     else { dot.classList.remove("on"); pstat.textContent = `${cap(partner())} offline`; }
 
-    // continue (active coop)
     const items = [];
     if (data.continue) items.push(data.continue);
     items.push(...(data.also_active || []));
-    showSect("s-continue", items.length > 0, () => {
+    const cont = $("#s-continue", el);
+    cont.hidden = items.length === 0;
+    if (!cont.hidden) {
       $("#continue-cards", el).innerHTML = items.map((g) => coopActiveCard(g)).join("");
       $$("#continue-cards .card", el).forEach((c, i) => c.addEventListener("click", () => openGame(items[i].id, false)));
-    });
+    }
 
-    // joinable (created by partner)
-    showSect("s-join", data.joinable.length > 0, () => {
+    const join = $("#s-join", el);
+    join.hidden = data.joinable.length === 0;
+    if (!join.hidden) {
+      $("#join-title", el).textContent = `${cap(partner())} made these — join in`;
       $("#join-cards", el).innerHTML = data.joinable.map((g) => joinCard(g)).join("");
       $$("#join-cards .card", el).forEach((c, i) => c.addEventListener("click", () => openGame(data.joinable[i].id, true)));
-    });
+    }
 
-    // my open invitations
-    showSect("s-open", data.my_open.length > 0, () => {
+    const openS = $("#s-open", el);
+    openS.hidden = data.my_open.length === 0;
+    if (!openS.hidden) {
+      $("#open-title", el).textContent = `Waiting for ${cap(partner())}`;
       $("#open-cards", el).innerHTML = data.my_open.map((g) => openCard(g)).join("");
-      $$("#open-cards .card", el).forEach((c, i) => c.addEventListener("clic" + "k", () => openGame(data.my_open[i].id, false)));
-    });
+      $$("#open-cards .card", el).forEach((c, i) => c.addEventListener("click", () => openGame(data.my_open[i].id, false)));
+    }
 
-    // solo
-    const rs = $("#resume-solo", el);
-    if (data.solo) {
-      rs.hidden = false;
-      rs.textContent = `Continue solo · ${cap(data.solo.difficulty)} · ${data.solo.progress}%`;
-    } else rs.hidden = true;
+    const soloS = $("#s-solo", el);
+    const soloGames = data.solo_games || [];
+    soloS.hidden = soloGames.length === 0;
+    if (!soloS.hidden) {
+      $("#solo-cards", el).innerHTML = soloGames.map((g) => soloCard(g)).join("");
+      $$("#solo-cards .card", el).forEach((c, i) => c.addEventListener("click", () => openGame(soloGames[i].id, false)));
+    }
 
-    // recent
     const rec = data.recent || [];
-    showSect("s-recent", rec.length > 0, () => {
+    const recS = $("#s-recent", el);
+    recS.hidden = rec.length === 0;
+    if (!recS.hidden) {
       $("#recent-cards", el).innerHTML = rec.map((g) => histCard(g)).join("");
       $$("#recent-cards .h", el).forEach((c, i) => c.addEventListener("click", () => openGame(rec[i].id, false)));
-    });
+    }
   };
-
-  function showSect(id, show, fill) {
-    const s = $("#" + id, el);
-    if (!show) { s.hidden = true; return; }
-    s.hidden = false;
-    fill();
-  }
 
   async function load() {
     try { render(await api("/api/home")); } catch (e) { if (String(e.message) !== "signed out") toast(e.message); }
   }
   load();
-  homePoll = setInterval(load, 15000);
+  const homePoll = setInterval(load, 15000);
   onUnload(() => clearInterval(homePoll));
 
   $("#new-coop", el).addEventListener("click", () => newGameSheet("coop"));
   $("#new-solo", el).addEventListener("click", () => newGameSheet("solo"));
-  $("#resume-solo", el).addEventListener("click", () => data.solo && openGame(data.solo.id, false));
-  $("#resume-solo", el).addEventListener("click", () => openGame(soloId, false));
+  $("#home-gear", el).addEventListener("click", () => settingsSheet());
 }
-let soloId = null;
-let data = null;
 
 function badge(g) {
   if (g.state === "completed") return '<span class="badge">Solved</span>';
@@ -273,7 +323,7 @@ function coopActiveCard(g) {
 }
 function joinCard(g) {
   return `<button class="card" data-g="${g.id}">
-    <div class="waiting-em">✉️</div>
+    <div class="waiting-em">💌</div>
     <div class="row1"><span class="diff">${cap(g.difficulty)}</span><span class="badge go">Join</span></div>
     <div class="meta">${cap(g.creator)} made this ${fmtAgo(g.created_at)} — waiting for you</div>
     <div class="cta">Join</div>
@@ -284,6 +334,14 @@ function openCard(g) {
     <div class="row1"><span class="diff">${cap(g.difficulty)}</span><span class="badge">Waiting</span></div>
     <div class="meta">Waiting for ${cap(partner())} to join · created ${fmtAgo(g.created_at)}</div>
     <div class="cta ghost">Open board</div>
+  </button>`;
+}
+function soloCard(g) {
+  return `<button class="card" data-g="${g.id}">
+    <div class="row1"><span class="diff">${cap(g.difficulty)}</span>${badge(g)}</div>
+    <div class="meta">${g.progress}% solved · ${fmtClock(g.elapsed_ms)} so far · last played ${fmtAgo(g.last_activity)}</div>
+    <div class="prog"><i style="width:${g.progress}%"></i></div>
+    <div class="cta">Continue</div>
   </button>`;
 }
 function histCard(g) {
@@ -301,7 +359,11 @@ function newGameSheet(kind) {
   wrap.className = "sheet-wrap";
   wrap.innerHTML = `<div class="sheet">
     <div class="grab"></div>
-    <h2>${kind === "coop" ? "New game together" : "New solo game"}</h2>
+    <div class="sheet-head">
+      <button class="sheet-back" id="sheet-back" aria-label="Back">‹</button>
+      <h2>${kind === "coop" ? "New game together" : "New solo game"}</h2>
+      <span class="sheet-head-sp"></span>
+    </div>
     <div class="lbl">Difficulty</div>
     <div class="diffrow">
       ${["easy", "medium", "hard", "expert"].map((d, i) => `<button data-d="${d}" class="${i === 1 ? "on" : ""}">${cap(d)}</button>`).join("")}
@@ -316,6 +378,7 @@ function newGameSheet(kind) {
     b.classList.add("on");
   }));
   const close = () => wrap.remove();
+  $("#sheet-back", wrap).addEventListener("click", close);
   wrap.addEventListener("click", (e) => { if (e.target === wrap) close(); });
   $("#mk", wrap).addEventListener("click", async () => {
     const btn = $("#mk", wrap);
@@ -333,44 +396,96 @@ function newGameSheet(kind) {
   });
 }
 
+/* ---------- settings sheet (NYT gameboard settings) ---------- */
+function settingsSheet() {
+  const wrap = document.createElement("div");
+  wrap.className = "sheet-wrap";
+  wrap.innerHTML = `<div class="sheet">
+    <div class="grab"></div>
+    <div class="sheet-head">
+      <button class="sheet-back" id="sheet-back" aria-label="Back">‹</button>
+      <h2>Settings</h2>
+      <span class="sheet-head-sp"></span>
+    </div>
+    <div class="lbl">Gameboard settings</div>
+    <div class="setlist">
+      ${SETTING_META.map((s) => `
+        <label class="setrow" data-k="${s.key}">
+          <span class="setname">${s.label}</span>
+          <span class="switch"><input type="checkbox" data-k="${s.key}" ${settings[s.key] ? "checked" : ""}><i></i></span>
+        </label>`).join("")}
+    </div>
+    <div class="hint" style="margin-top:14px">Settings apply on this device, live.</div>
+  </div>`;
+  document.body.appendChild(wrap);
+  const close = () => wrap.remove();
+  $("#sheet-back", wrap).addEventListener("click", close);
+  wrap.addEventListener("click", (e) => { if (e.target === wrap) close(); });
+  $$("input[type=checkbox]", wrap).forEach((cb) => {
+    cb.addEventListener("change", () => {
+      settings[cb.dataset.k] = cb.checked;
+      saveSettings();
+      if (cb.dataset.k === "autoCandidate" && gameCtx) {
+        gameCtx.mode = cb.checked ? "auto" : "normal";
+      }
+      if (gameCtx && gameCtx.game) render();
+    });
+  });
+}
+
 /* ---------- game ---------- */
 let gameCtx = null;
 function openGame(gid, viaJoin) {
   unloadView();
   const el = setView(`<div class="game" id="gd"></div>`, "");
-  gameCtx = { gid, ws: null, closed: false, sel: null, noteMode: false, game: null, undoStack: [], lastVals: {}, cellsEls: [], timer: { base: 0, running: false, at: 0 }, flash: {} };
+  gameCtx = {
+    gid, ws: null, closed: false, sel: null, mode: settings.autoCandidate ? "auto" : "normal",
+    game: null, undoStack: [], cellsEls: [], prevCells: {},
+    timer: { base: 0, running: false, at: 0 }, online: [], pendingDigit: null,
+    reconnectTimer: null,
+  };
   const c = gameCtx;
   el.innerHTML = `
     <div class="ghead">
       <button class="back" id="bk" aria-label="home">‹</button>
       <div class="mid">
-        <div class="tl"><span class="diff" id="gdiff"></span><span class="sep">·</span><span id="gkind"></span></div>
+        <div class="tl"><span id="gdiff"></span><span class="sep">·</span><span id="gkind"></span></div>
         <div class="sub" id="gmeta"></div>
       </div>
       <div style="text-align:right">
         <div class="timer" id="gtimer">0:00</div>
         <div class="presence" id="pres"></div>
       </div>
+      <button class="gear" id="gear" aria-label="settings">⚙️</button>
+      <button class="delbtn" id="del-game" aria-label="delete game">🗑</button>
     </div>
-    <div class="pbar"><i id="pbar-i"></i></div>
     <div id="gstatus"></div>
     <div class="boardwrap"><div class="board" id="board"></div></div>
     <div class="pad">
-      <div class="padrow" id="padrow"></div>
-      <div class="tools">
-        <button class="tool" id="t-note"><span class="ic">✎<small id="notecount"></small></span>Notes</button>
-        <button class="tool" id="t-erase"><span class="ic">⌫</span>Erase</button>
-        <button class="tool" id="t-undo"><span class="ic">↩︎</span>Undo</button>
-        <button class="tool" id="t-hint"><span class="ic">✦</span>Hint</button>
+      <div class="bar">
+        <button class="barbtn" id="t-undo" type="button">↩︎<span>Undo</span></button>
+        <div class="numrow" id="numrow"></div>
+        <button class="barbtn" id="t-erase" type="button">⌫<span>Erase</span></button>
+      </div>
+      <div class="row2">
+        <button class="modechip ${gameCtx.mode === "normal" ? "on" : ""}" id="m-normal" type="button">Normal</button>
+        <button class="modechip ${gameCtx.mode === "notes" ? "on" : ""}" id="m-cand" type="button">Candidate</button>
+        <button class="modechip ${gameCtx.mode === "auto" ? "on" : ""}" id="m-auto" type="button">Auto Candidate</button>
+        <button class="barbtn small" id="t-hint" type="button">✦<span>Hint</span></button>
       </div>
     </div>`;
 
   buildBoard(el);
   buildPad(el);
   bindTools(el);
-
-  $("#bk", el).addEventListener("click", () => { goHome(); });
-
+  $("#bk", el).addEventListener("click", () => goHome());
+  $("#gear", el).addEventListener("click", () => settingsSheet());
+  $("#del-game", el).addEventListener("click", () => confirmDeleteSheet());
+  onUnload(() => {
+    c.closed = true;
+    if (c.reconnectTimer) clearTimeout(c.reconnectTimer);
+    try { if (c.ws) c.ws.close(); } catch {}
+  });
   connect(gid, viaJoin);
 }
 
@@ -379,86 +494,128 @@ function buildBoard(el) {
   const c = gameCtx;
   for (let i = 0; i < 81; i++) {
     const d = document.createElement("div");
+    d.className = "cell";
     const col = i % 9, row = Math.floor(i / 9);
     if (col % 3 === 2 && col !== 8) d.classList.add("br3");
     if (row % 3 === 2 && row !== 8) d.classList.add("bb3");
     d.dataset.i = i;
     board.appendChild(d);
     c.cellsEls.push(d);
-    d.addEventListener("click", () => selectCell(i));
+    d.addEventListener("click", () => tapCell(i));
   }
 }
 function buildPad(el) {
-  const row = $("#padrow", el);
+  const row = $("#numrow", el);
   for (let v = 1; v <= 9; v++) {
     const k = document.createElement("button");
+    k.type = "button";
     k.className = "key";
     k.dataset.v = v;
-    k.innerHTML = `<span class="left" id="left-${v}"></span>${v}`;
-    row.appendChild(k);
+    k.textContent = String(v);
     k.addEventListener("click", () => pressDigit(v));
+    row.appendChild(k);
   }
 }
 function bindTools(el) {
-  const c = gameCtx;
-  $("#t-note", el).addEventListener("click", () => {
-    c.noteMode = !c.noteMode;
-    $("#t-note", el).classList.toggle("on", c.noteMode);
-  });
   $("#t-erase", el).addEventListener("click", () => doErase());
-  $("#t-undo", el).onCLick = null;
   $("#t-undo", el).addEventListener("click", () => doUndo());
   $("#t-hint", el).addEventListener("click", () => doHint());
+  $("#m-normal", el).addEventListener("click", () => { gameCtx.mode = "normal"; render(); });
+  $("#m-cand", el).addEventListener("click", () => { gameCtx.mode = "notes"; render(); });
+  $("#m-auto", el).addEventListener("click", () => { gameCtx.mode = "auto"; render(); });
 }
 
-function selectCell(i) {
-  const c = gameCtx;
-  const g = c.game;
-  if (!g) return;
-  c.sel = i;
-  const val = cellVal(g, i);
-  c.cellsEls.forEach((d, j) => {
-    d.classList.toggle("sel", j === i);
-    const row = Math.floor(j / 9), col = j % 9;
-    const sr = Math.floor(i / 9), sc = i % 9;
-    const hl = row === sr || col === sc || (Math.floor(row / 3) === Math.floor(sr / 3) && Math.floor(col / 3) === Math.floor(sc / 3));
-    d.classList.toggle("hl", hl && j !== i);
-    d.classList.toggle("same", !!val && cellVal(g, j) === val && j !== i);
-  });
-}
 function cellVal(g, i) {
   if (g.puzzle[i] !== "0") return +g.puzzle[i];
   const cell = g.cells[String(i)];
   return cell ? cell.v : 0;
 }
+function autoCandidates(g) {
+  const out = {};
+  for (let i = 0; i < 81; i++) {
+    if (g.puzzle[i] !== "0" || g.cells[String(i)]) continue;
+    const used = new Set();
+    const r = Math.floor(i / 9), col = i % 9;
+    const br = Math.floor(r / 3) * 3, bc = Math.floor(col / 3) * 3;
+    for (let k = 0; k < 9; k++) {
+      used.add(cellVal(g, r * 9 + k));
+      used.add(cellVal(g, k * 9 + col));
+      used.add(cellVal(g, (br + Math.floor(k / 3)) * 9 + bc + (k % 3)));
+    }
+    const cands = [];
+    for (let d = 1; d <= 9; d++) if (!used.has(d)) cands.push(d);
+    if (cands.length) out[i] = cands;
+  }
+  return out;
+}
+function conflicts(g) {
+  const bad = new Set();
+  const units = [];
+  for (let r = 0; r < 9; r++) units.push(Array.from({ length: 9 }, (_, k) => r * 9 + k));
+  for (let col = 0; col < 9; col++) units.push(Array.from({ length: 9 }, (_, k) => k * 9 + col));
+  for (let br = 0; br < 9; br += 3) for (let bc = 0; bc < 9; bc += 3)
+    units.push(Array.from({ length: 9 }, (_, k) => (br + Math.floor(k / 3)) * 9 + bc + (k % 3)));
+  for (const unit of units) {
+    const seen = {};
+    for (const i of unit) {
+      const v = cellVal(g, i);
+      if (!v || g.puzzle[i] !== "0") continue;
+      if (seen[v] !== undefined) { bad.add(i); bad.add(seen[v]); }
+      else seen[v] = i;
+    }
+  }
+  return bad;
+}
+
+function tapCell(i) {
+  const c = gameCtx;
+  const g = c.game;
+  if (!g) return;
+  if (g.puzzle[i] !== "0" && c.pendingDigit == null) { c.sel = i; render(); return; }
+  c.sel = i;
+  if (c.pendingDigit != null) {
+    const v = c.pendingDigit;
+    c.pendingDigit = null;
+    flashKey(null);
+    placeDigit(v);
+  } else {
+    render();
+  }
+}
+
+function firstEmpty(g) {
+  for (let i = 0; i < 81; i++) if (!cellVal(g, i)) return i;
+  return 0;
+}
+
 function render() {
   const c = gameCtx;
   const g = c.game;
   if (!g) return;
   const el = $("#gd");
+  if (!el) return;
   $("#gdiff", el).textContent = cap(g.difficulty);
   $("#gkind", el).textContent = g.kind === "coop" ? "Together" : "Solo";
-  const metas = [];
-  metas.push(`<span>${g.progress}%</span>`);
-  if (g.kind === "coop") {
-    metas.push('<span class="m">·</span>');
-    metas.push(`<span>${esc(cap(g.creator))} started</span>`);
-    const mk = g.mistakes || {};
-    const mine = mk[me()] || 0, theirs = mk[partner()] || 0;
-    metas.push('<span class="m">·</span>');
-    metas.push(`<span class="m">mistakes ${mine}–${theirs}</span>`);
 
-    if (g.creator === me() && g.state === "waiting") {
-      metas.push('<span class="m">·</span>');
-      metas.push(`<span class="playing">waiting for ${esc(cap(partner()))}…</span>
-        <button id="startnow" style="color:var(--accent);font-weight:600;font-size:12.5px">start now</button>`);
-    }
+  const tEl = $("#gtimer", el);
+  tEl.style.visibility = settings.showTimer ? "visible" : "hidden";
+  tEl.textContent = fmtClock(g.elapsed_ms);
+
+  const metas = [];
+  if (settings.errorCounter) {
+    const mk = g.mistakes || {};
+    if (g.kind === "coop") metas.push(`<span>✕ ${mk[me()] || 0}–${mk[partner()] || 0}</span>`);
+    else metas.push(`<span>✕ ${mk[me()] || 0}</span>`);
+  }
+  if (g.kind === "coop" && g.state === "waiting") {
+    metas.push(`<span class="m">·</span><span style="color:var(--green)">waiting for ${esc(cap(partner()))}…</span>`);
   }
   $("#gmeta", el).innerHTML = metas.join(" ");
-  const sn = $("#startnow", el);
-  if (sn) sn.addEventListener("click", (e) => { e.stopPropagation(); send({ type: "start" }); });
 
-  // presence
+  $("#m-normal", el).classList.toggle("on", c.mode === "normal");
+  $("#m-cand", el).classList.toggle("on", c.mode === "notes");
+  $("#m-auto", el).classList.toggle("on", c.mode === "auto");
+
   const pres = $("#pres", el);
   if (g.kind === "coop") {
     const on = c.online || [];
@@ -468,80 +625,131 @@ function render() {
     }).join("");
   } else pres.innerHTML = "";
 
-  // timer base
   c.timer.base = g.elapsed_ms;
-  c.timer.running = g.running && g.state !== "completed";
+  c.timer.running = g.running && g.state !== "completed" && settings.showTimer;
   c.timer.at = Date.now();
 
-  // board cells
+  const auto = c.mode === "auto" ? autoCandidates(g) : null;
+  const bad = settings.hlConflicts ? conflicts(g) : new Set();
   for (let i = 0; i < 81; i++) {
     const d = c.cellsEls[i];
     const given = g.puzzle[i] !== "0";
     const cell = g.cells[String(i)];
-    const notes = g.notes[String(i)] || [];
+    const manualNotes = g.notes[String(i)] || [];
     let html = "";
     if (given) html = `<span>${g.puzzle[i]}</span>`;
     else if (cell) {
-      const pop = c.flash[i] !== undefined && c.flash[i] !== cell.t;
       html = `<span>${cell.v}</span>`;
-      if (pop) d.classList.remove("pop"), void d.offsetWidth, d.classList.add("pop");
+      const prev = c.prevCells[String(i)];
+      if (!prev || prev.v !== cell.v) {
+        d.classList.remove("pop");
+        void d.offsetWidth;
+        d.classList.add("pop");
+      }
+    } else if (manualNotes.length) {
+      html = `<div class="notes">${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => `<i>${manualNotes.includes(n) ? n : ""}</i>`).join("")}</div>`;
+    } else if (auto && auto[i]) {
+      html = `<div class="notes auto">${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => `<i>${auto[i].includes(n) ? n : ""}</i>`).join("")}</div>`;
     }
     d.classList.toggle("given", given);
     d.classList.toggle("user", !given && !!cell);
-    d.classList.toggle("by-two", !given && cell && cell.by === "two");
-    d.classList.toggle("wrong", !given && cell && cell.wrong);
-    if (!given && !cell && notes.length) {
-      html = `<div class="notes">${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => `<i class="${n === c.lastVal ? "" : ""}">${notes.includes(n) ? n : ""}</i>`).join("")}</div>`;
-    }
+    d.classList.toggle("unchecked", !given && !!cell && !settings.check);
+    d.classList.toggle("wrong", !given && !!cell && settings.check && cell.wrong);
+    d.classList.toggle("by-partner", !given && cell && cell.by && cell.by !== me());
+    d.classList.toggle("conflict", bad.has(i));
     d.innerHTML = html;
   }
-  // note-count indicators: value → how many left
-  const left = {};
-  for (let v = 1; v <= 9; v++) {
-    let placed = 0;
-    for (let i = 0; i < 81; i++) if (cellVal(g, i) === v) placed++;
-    left[v] = 9 - placed;
+  c.prevCells = JSON.parse(JSON.stringify(g.cells));
+
+  const selIdx = c.sel != null ? c.sel : firstEmpty(g);
+  const val = cellVal(g, selIdx);
+  const sr = Math.floor(selIdx / 9), sc = selIdx % 9;
+  const sbr = Math.floor(sr / 3), sbc = Math.floor(sc / 3);
+  for (let j = 0; j < 81; j++) {
+    const d = c.cellsEls[j];
+    const row = Math.floor(j / 9), col = j % 9;
+    d.classList.toggle("sel", j === selIdx);
+    const inRowCol = row === sr || col === sc;
+    const inBox = Math.floor(row / 3) === sbr && Math.floor(col / 3) === sbc;
+    const hl = (settings.hlRowCol && inRowCol) || (settings.hlBox && inBox);
+    d.classList.toggle("hl", hl && j !== selIdx);
+    d.classList.toggle("same", settings.hlSame && !!val && j !== selIdx && cellVal(g, j) === val);
   }
-  for (let v = 1; v <= 9; v++) {
-    const el2 = document.getElementById(`left-${v}`);
-    if (el2) { el2.textContent = left[v] > 0 ? left[v] : ""; el2.parentElement.classList.toggle("done", left[v] === 0); }
-  }
-  // progress bar
-  $("#pbar-i", el).style.width = g.progress + "%";
-  // status line
+
   const st = $("#gstatus", el);
   st.innerHTML = "";
-  if (g.state === "completed") showDone(g);
   if (g.kind === "coop" && g.state === "waiting") {
-    st.innerHTML = `<div class="status">Waiting for ${esc(cap(partner()))} to open the app and join. The board is ready.</div>`;
+    st.innerHTML = `<div class="statusline">Waiting for ${esc(cap(partner()))} — they'll see this game on their home screen.</div>`;
   }
-  selectCell(c.sel ?? firstEmpty(g));
-}
-function firstEmpty(g) {
-  for (let i = 0; i < 81; i++) if (!cellVal(g, i)) return i;
-  return 0;
+
+  if (g.state === "completed") showDone(g);
+  else if ($("#doneov")) $("#doneov").remove();
 }
 
-/* ---------- ws ---------- */
+/* ---------- delete game ---------- */
+function confirmDeleteSheet() {
+  const c = gameCtx;
+  if (!c || !c.game) return;
+  const g = c.game;
+  const wrap = document.createElement("div");
+  wrap.className = "sheet-wrap";
+  const label = g.kind === "coop"
+    ? `Delete this ${g.difficulty} game? It disappears for both of you.`
+    : `Delete this ${g.difficulty} solo game?`;
+  wrap.innerHTML = `<div class="sheet">
+    <div class="grab"></div>
+    <div class="sheet-head">
+      <button class="sheet-back" id="sheet-back" aria-label="Back">‹</button>
+      <h2>Delete game</h2>
+      <span class="sheet-head-sp"></span>
+    </div>
+    <div class="delnote">${label}</div>
+    <div class="btns">
+      <button class="danger" id="del-yes" type="button">Delete</button>
+      <button class="homebtn" id="del-no" type="button">Keep playing</button>
+    </div>
+  </div>`;
+  document.body.appendChild(wrap);
+  const close = () => wrap.remove();
+  $("#sheet-back", wrap).addEventListener("click", close);
+  $("#del-no", wrap).addEventListener("click", close);
+  wrap.addEventListener("click", (e) => { if (e.target === wrap) close(); });
+  $("#del-yes", wrap).addEventListener("click", async () => {
+    const btn = $("#del-yes", wrap);
+    btn.disabled = true;
+    btn.textContent = "Deleting…";
+    try {
+      await api(`/api/games/${g.id}`, { method: "DELETE" });
+    } catch (e) {
+      toast(e.message);
+    }
+    wrap.remove();
+    goHome();
+  });
+}
+
+/* ---------- websocket ---------- */
 function connect(gid, viaJoin) {
   const c = gameCtx;
   if (c.closed) return;
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const token = LS.get("token");
   const url = `${proto}://${location.host}/ws/games/${gid}?player=${me()}&token=${encodeURIComponent(token)}`;
-  let opened = false;
-  setStatus("Connecting…", "warn");
+  setStatus("Connecting…", true);
   const ws = new WebSocket(url);
   c.ws = ws;
-  ws.onopen = () => { opened = true; };
+  c.pongOk = false;
+  ws.onopen = () => { c.pongOk = true; };
   ws.onmessage = (m) => {
-    const msg = JSON.parse(m.data);
+    let msg;
+    try { msg = JSON.parse(m.data); } catch { return; }
+    if (msg.type === "pong") { c.pongOk = true; return; }
     if (msg.type === "state") {
       const first = !c.game;
       c.game = msg.game;
-      c.flash = {};
+      setStatus("");
       render();
-      if (first && viaJoin) toast("Joined!");
+      if (first && viaJoin) toast("Joined — happy solving!");
     } else if (msg.type === "presence") {
       c.online = msg.online;
       if (c.game) render();
@@ -549,57 +757,83 @@ function connect(gid, viaJoin) {
       toast(msg.error);
     }
   };
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
     if (c.closed) return;
-    setStatus("Reconnecting…", "warn");
-    setTimeout(() => connect(gid, false), 1200);
+    if (ev.code === 4401) { goWelcome(); return; }
+    if (ev.code === 4404) { toast("That game is gone"); goHome(); return; }
+    if (ev.code === 4408) { setStatus("Reconnecting…", true); c.reconnectTimer = setTimeout(() => { if (!c.closed) connect(gid, false); }, 1200); return; }
+    setStatus("Reconnecting…", true);
+    c.reconnectTimer = setTimeout(() => { if (!c.closed) connect(gid, false); }, 1200);
   };
 }
-function setStatus(txt, cls) {
+/* watchdog: ping every 20s; if a pong is missing twice in a row, the socket is
+   half-open (common after iOS backgrounding) — kill and reconnect */
+setInterval(() => {
+  const c = gameCtx;
+  if (!c || c.closed || !c.ws) return;
+  if (c.ws.readyState !== 1) return;
+  if (c.pongOk === false) {
+    try { c.ws.close(); } catch {}
+    return;
+  }
+  c.pongOk = false;
+  try { c.ws.send(JSON.stringify({ type: "ping" })); } catch {}
+}, 20000);
+function setStatus(txt, warn) {
   const st = $("#gstatus");
   if (!st) return;
-  st.innerHTML = txt ? `<div class="status ${cls || ""}">${txt}</div>` : "";
+  st.innerHTML = txt ? `<div class="statusline ${warn ? "warnline" : ""}">${txt}</div>` : "";
 }
 function send(obj) {
   const c = gameCtx;
   if (c && c.ws && c.ws.readyState === 1) c.ws.send(JSON.stringify(obj));
 }
 
-/* ---------- play ---------- */
+/* ---------- play (NYT input: tap digit, then cell — or cell, then digit) ---------- */
 function pushUndo(i, g) {
   const c = gameCtx;
   const cell = g.cells[String(i)];
   const notes = g.notes[String(i)] || [];
   c.undoStack.push({ idx: i, value: cell ? cell.v : 0, notes: [...notes] });
-  if (c.undoStack.length > 120) c.undoStack.shift();
+  if (c.undoStack.length > 150) c.undoStack.shift();
 }
 function pressDigit(v) {
   const c = gameCtx;
   const g = c.game;
   if (!g || g.state === "completed") return;
-  if (g.kind === "coop" && g.state === "waiting" && g.creator === me()) {
-    send({ type: "start" });
-    // fall through: server will broadcast active state; still apply locally optimistic? keep simple: wait for server
+  if (c.sel != null && (g.puzzle[c.sel] === "0" || c.mode === "notes")) {
+    placeDigit(v);
+  } else {
+    c.pendingDigit = v;
+    flashKey(v);
+    toast(`Placing ${v} — tap a square`);
   }
-  if (c.sel == null) { toast("Tap a square first"); return; }
+}
+function flashKey(v) {
+  $$(".key").forEach((k) => k.classList.toggle("flash", String(k.dataset.v) === String(v)));
+}
+function placeDigit(v) {
+  const c = gameCtx;
+  const g = c.game;
   const i = c.sel;
-  if (g.puzzle[i] !== "0") return;
-  pushUndo(i, g);
-  if (c.noteMode) {
-    const cell = g.cells[String(i)];
-    if (cell) { toast("Clear the number first"); return; }
+  if (g.puzzle[i] !== "0") { toast("That one's a given"); return; }
+  if (c.mode === "notes") {
+    if (g.cells[String(i)]) { toast("Erase the number first"); return; }
+    pushUndo(i, g);
     send({ type: "note", idx: i, digit: v });
     return;
   }
-  c.lastVal = v;
+  pushUndo(i, g);
   send({ type: "set", idx: i, value: v });
 }
 function doErase() {
   const c = gameCtx;
   const g = c.game;
-  if (!g || c.sel == null || g.state === "completed") return;
+  if (!g || g.state === "completed") return;
+  if (c.sel == null) { toast("Tap a square first"); return; }
   const i = c.sel;
   if (g.puzzle[i] !== "0") return;
+  if (!g.cells[String(i)] && !(g.notes[String(i)] || []).length) return;
   pushUndo(i, g);
   send({ type: "erase", idx: i });
 }
@@ -615,37 +849,49 @@ function doHint() {
   const c = gameCtx;
   const g = c.game;
   if (!g || g.state === "completed") return;
-  const empties = [];
-  for (let i = 0; i < 81; i++) {
-    if (g.puzzle[i] === "0" && !g.cells[String(i)]) empties.push(i);
-  }
-  if (!empties.length) return;
-  // ask server: hint reveals a correct value in a random empty cell; costs a mistake? keep free
-  send({ type: "hint" });
+  if (c.sel == null || g.puzzle[c.sel] !== "0") { toast("Tap an empty square first"); return; }
+  send({ type: "hint", idx: c.sel });
 }
 
-/* ---------- done overlay ---------- */
+/* ---------- completion ---------- */
 function showDone(g) {
   if ($("#doneov")) return;
+  playJingle();
+  // per-player stats from the final board: every placed cell carries "by"
+  const stats = {};
+  const givens = [...g.puzzle].filter((ch) => ch !== "0").length;
+  for (const c of Object.values(g.cells)) {
+    const p = c.by || "?";
+    stats[p] = (stats[p] || 0) + 1;
+  }
+  const p0N = stats[ROSTER[0]] || 0;
+  const p1N = stats[ROSTER[1]] || 0;
   const wrap = document.createElement("div");
   wrap.className = "done-wrap";
   wrap.id = "doneov";
+  const coopStats = g.kind === "coop" ? `
+    <div class="winstats">
+      <div class="ws-row"><span class="ws-dot" style="background:var(--evan)"></span>${cap(ROSTER[0])}</span><b>${p0N}</b></div>
+      <div class="ws-row"><span class="ws-dot" style="background:var(--sarah-lav)"></span>${cap(ROSTER[1])}</span><b>${p1N}</b></div>
+    </div>` : "";
+  const mk = g.mistakes || {};
   wrap.innerHTML = `<div class="done">
-    <div class="tick">🎉</div>
+    <div class="hearts" aria-hidden="true">
+      ${[...Array(10)].map((_, i) => `<span style="--d:${(i * 0.35).toFixed(2)}s;--x:${Math.round(Math.random() * 100)}%">💗</span>`).join("")}
+    </div>
+    <div class="tick">🧩</div>
     <h2>Solved!</h2>
     <div class="big-time">${fmtClock(g.elapsed_ms)}</div>
-    <div class="sub">${g.kind === "coop" ? "Two & One, together as always" : "A clean solo solve"}</div>
-    <div class="sub">Mistakes — you ${(g.mistakes || {})[me()] || 0} · ${cap(partner())} ${(g.mistakes || {})[partner()] || 0}</div>
+    ${coopStats}
+    <div class="sub">${g.kind === "coop" ? `${cap(ROSTER[0])} & ${cap(ROSTER[1])} — what a team 💕` : "A lovely solo solve ✨"}</div>
+    <div class="sub">Mistakes — you ${mk[me()] || 0} · ${cap(partner())} ${mk[partner()] || 0}</div>
     <div class="btns">
-      <button class="again" id="dn-again">Play again</button>
-      <button class="autohome" id="dn-home">Home</button>
+      <button class="again" id="dn-again" type="button">Play again</button>
+      <button class="homebtn" id="dn-home" type="button">Home</button>
+    </div>
   </div>`;
   document.body.appendChild(wrap);
-  $("#dn-again", wrap).addEventListener("click", async () => {
-    wrap.remove();
-    newGameSheet(g.kind);
-  });
-  $("#dn-home", wrap). poll = null;
+  $("#dn-again", wrap).addEventListener("click", () => { wrap.remove(); newGameSheet(g.kind); });
   $("#dn-home", wrap).addEventListener("click", () => { wrap.remove(); goHome(); });
 }
 
@@ -658,4 +904,12 @@ setInterval(() => {
 }, 500);
 
 /* ---------- boot ---------- */
-if (signedIn()) goHome(); else goWelcome();
+(async () => {
+  try {
+    const r = await fetch("/api/who");
+    const d = await r.json();
+    if (Array.isArray(d.players) && d.players.length === 2) ROSTER = d.players;
+  } catch {}
+  if (signedIn()) goHome();
+  else goWelcome();
+})();

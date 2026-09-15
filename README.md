@@ -1,35 +1,44 @@
-# Two Player Sudoku
+# Our Sudoku
 
-A private, mobile-first co-op Sudoku app for exactly two players: One & Two.
+A tiny two-player co-op Sudoku — one shared passcode, no accounts, no invites.
+Pick your name once and play: shared boards with live sync of values, notes,
+mistakes and the timer over WebSockets, or solo with saved progress and resume.
 
-- Real co-op: shared board, live sync of values/notes/mistakes/timer over WebSockets
+- Real co-op: two players on one board, every cell placement syncs live
 - Solo mode with saved progress and resume
 - Genuine generator: every puzzle valid, unique solution, graded difficulty
-- No accounts, no codes, no invites — pick your name once, done
+- Installable mobile-first PWA (iOS: Safari → Add to Home Screen)
+
+## Configuration
+
+Everything is env-driven (a `.env` file works — see `.gitignore`):
+
+| Variable | Default | What |
+|---|---|---|
+| `PASSCODE` | `0000` | the shared 4-digit code |
+| `SUDOKU_PLAYERS` | `one,two` | exactly two comma-separated player names |
+| `AUTH_SECRET` | random | token-signing secret (set it or tokens die on restart) |
+| `SUDOKU_DB` | `data/sudoku.db` | SQLite path |
 
 ## Stack
 
 - FastAPI + WebSockets + SQLite (WAL), single process, systemd service
-- Vanilla-JS mobile-first PWA (installable on iOS via Safari → Add to Home Screen)
+- Vanilla-JS mobile-first PWA (no build step)
 
 ## Layout
 
 - `app/engine.py` — generator / solver / difficulty grader
 - `app/main.py` — HTTP + WS API
-- `app/state.py` — SQLite persistence
+- `app/state.py` — SQLite persistence + game operations
 - `app/realtime.py` — connection manager, authoritative game ops
 - `static/` — frontend (no build step)
 - `tests/` — pytest: engine correctness + full two-client WS lifecycle
 
 ## Run locally
 
-```
-python3 -m venv venv && venv/bin/pip install -r requirements.txt
-venv/bin/pytest -q
-venv/bin/uvicorn app.main:app --port 8790
-```
+    python3 -m venv venv && venv/bin/pip install -r requirements.txt
+    PASSCODE=1234 SUDOKU_PLAYERS=alice,bob venv/bin/uvicorn app.main:app --port 8790
 
-## Production
+## Tests
 
-systemd unit `sudoku.service`, port 8790, DB at `data/sudoku.db`.
-Passcode gate (shared 4-digit code) set via `PASSCODE` in `.env`.
+    venv/bin/python -m pytest -q

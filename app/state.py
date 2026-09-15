@@ -140,8 +140,11 @@ def list_games(conn, limit: int = 200) -> list:
     return [row_to_game(r) for r in rows]
 
 
-def other(player: str) -> str:
-    return "two" if player == "one" else "one"
+def other(player: str, players=("one", "two")) -> str:
+    for p in players:
+        if p != player:
+            return p
+    return player
 
 
 # ---------- timer ----------
@@ -218,7 +221,10 @@ def _check_complete(g: dict, player: str, now: float):
         if not c or str(c.get("v")) != sol[i]:
             return
     g["state"] = "completed"
-    g["elapsed_ms"] = live_elapsed_ms(g, now)
+    # NB: compute from raw fields — live_elapsed_ms() ignores the running
+    # segment once state is already "completed" (ordering bug fixed here)
+    if g["running_since"] is not None:
+        g["elapsed_ms"] = (g["elapsed_ms"] or 0.0) + (now - g["running_since"]) * 1000.0
     g["running_since"] = None
     g["completed_at"] = now
     g["completed_by"] = player
@@ -237,6 +243,11 @@ def apply_op(g: dict, player: str, op: dict):
             g["running_since"] = now
             g["last_activity"] = now
         return None
+
+    # any play op also flips a waiting co-op game to active (first move starts it)
+    if g["state"] == "waiting":
+        g["state"] = "active"
+        g["running_since"] = now
 
     idx = op.get("idx")
     if not isinstance(idx, int) or not (0 <= idx <= 80) or isinstance(idx, bool):
@@ -309,7 +320,7 @@ def apply_op(g: dict, player: str, op: dict):
         v = op.get("value", 0)
         prev_notes = op.get("notes", [])
         prev_by = op.get("by") or player
-        if prev_by not in ("one", "two"):
+        if not isinstance(prev_by, str) or not prev_by.replace("_", "").isalnum() or len(prev_by) > 24:
             prev_by = player
         if isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 9:
             wrong = str(v) != g["solution"][idx]
@@ -328,13 +339,25 @@ def apply_op(g: dict, player: str, op: dict):
         _check_complete(g, player, now)
         return None
 
+    if t == "hint":
+        if given:
+            return "can't hint a given cell"
+        g["cells"][str(idx)] = {"v": int(g["solution"][idx]), "by": player, "t": now, "wrong": False}
+        g["notes"].pop(str(idx), None)
+        g["last_activity"] = now
+        _check_complete(g, player, now)
+        return None
+
     return "unknown op"
 
 
 def join(g: dict, player: str) -> dict:
-    if player not in g["players"]:
+    newly = player not in g["players"]
+    if newly:
         g["players"].append(player)
-    if g["kind"] == "coop" and g["state"] == "waiting":
+    # only the partner joining wakes a waiting game; the creator opening their
+    # own board keeps it waiting (they can still play ahead — first move starts it)
+    if newly and g["kind"] == "coop" and g["state"] == "waiting":
         g["state"] = "active"
         g["running_since"] = time.time()
     g["last_activity"] = time.time()

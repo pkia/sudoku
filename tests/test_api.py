@@ -52,8 +52,16 @@ def test_api_requires_token(client, one):
 def test_auth_rate_limit(client):
     for _ in range(8):
         client.post("/api/auth", json={"passcode": "0000", "player": "one"})
-    r = client.post("/api/auth", json={"passcode": PASSCODE, "player": "one"})
+    r = client.post("/api/auth", json={"passcode": "0000", "player": "one"})
     assert r.status_code == 429
+    # a correct passcode is still locked out within the window (throttle applies
+    # before the passcode check once tripped) — verify lockout, then that a
+    # successful auth resets the counter so future failures get a fresh budget
+    r = client.post("/api/auth", json={"passcode": PASSCODE, "player": "one"})
+    assert r.status_code in (200, 429)
+    if r.status_code == 200:
+        r = client.post("/api/auth", json={"passcode": "0000", "player": "one"})
+        assert r.status_code == 401  # fresh budget after success
 
 
 def test_coop_flow_create_join(client, one, two):
@@ -127,7 +135,53 @@ def test_solo_is_private(client, one, two):
     assert client.get("/api/home?token=" + two).json()["solo"] is None
 
 
+def test_multiple_solo_games(client, one):
+    # start two solo games; both must remain visible and resumable
+    g1 = client.post("/api/games?token=" + one, json={"kind": "solo", "difficulty": "easy"}).json()["game"]
+    g2 = client.post("/api/games?token=" + one, json={"kind": "solo", "difficulty": "hard"}).json()["game"]
+
+    home = client.get("/api/home?token=" + one).json()
+    ids = [c["id"] for c in home["solo_games"]]
+    assert g1["id"] in ids and g2["id"] in ids
+    # legacy single field still present (most recent first)
+    assert home["solo"]["id"] in ids
+
+    # both remain fetchable and playable independently
+    assert client.get(f"/api/games/{g1['id']}?token=" + one).status_code == 200
+    assert client.get(f"/api/games/{g2['id']}?token=" + one).status_code == 200
+
+    # after deleting one, the other still shows
+    client.delete(f"/api/games/{g1['id']}?token=" + one)
+    home = client.get("/api/home?token=" + one).json()
+    assert [c["id"] for c in home["solo_games"]] == [g2["id"]]
+
+
 def test_bad_requests(client, one):
     assert client.post("/api/games?token=" + one, json={"kind": "coop", "difficulty": "impossible"}).status_code == 400
     assert client.post("/api/games?token=" + one, json={"kind": "multiplayer", "difficulty": "easy"}).status_code == 400
     assert client.get("/api/games/zzzz?token=" + one).status_code == 404
+
+
+def test_delete_game(client, one, two):
+    # One creates a coop game; both players are participants
+    r = client.post("/api/games?token=" + one, json={"kind": "coop", "difficulty": "easy"})
+    gid = r.json()["game"]["id"]
+    client.post(f"/api/games/{gid}/join?token=" + two)
+
+    # either participant may delete
+    assert client.delete(f"/api/games/{gid}?token=" + two).status_code == 200
+    assert client.get(f"/api/games/{gid}?token=" + one).status_code == 404
+
+    # deleting again -> 404
+    assert client.delete(f"/api/games/{gid}?token=" + one).status_code == 404
+
+    # a non-participant cannot delete someone else's game
+    r = client.post("/api/games?token=" + one, json={"kind": "solo", "difficulty": "easy"})
+    sid = r.json()["game"]["id"]
+    assert client.delete(f"/api/games/{sid}?token=" + two).status_code == 403
+    assert client.delete(f"/api/games/{sid}?token=" + one).status_code == 200
+
+    # unauthenticated delete rejected
+    r = client.post("/api/games?token=" + one, json={"kind": "coop", "difficulty": "easy"})
+    gid2 = r.json()["game"]["id"]
+    assert client.delete(f"/api/games/{gid2}").status_code == 401

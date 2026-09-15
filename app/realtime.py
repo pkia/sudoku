@@ -40,3 +40,12 @@ class Hub:
                     await ws.send_json(message)
                 except Exception:
                     pass
+
+    async def close_all(self, gid: str, code: int = 1012):
+        """Close every socket attached to a game (used when a game is deleted)."""
+        conns = list(self._games.get(gid, {}).items())
+        for p, ws in conns:
+            try:
+                await ws.close(code=code)
+            except Exception:
+                pass

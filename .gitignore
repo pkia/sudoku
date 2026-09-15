@@ -1,3 +1,7 @@
+# secrets & local data — never commit
+.env
+data/*.db
+
 # added by project-guard at adoption
 __pycache__/
 *.pyc
